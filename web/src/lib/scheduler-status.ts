@@ -68,13 +68,7 @@ async function readTask(): Promise<SchedulerStatus["task"]> {
     `$task = Get-ScheduledTask -TaskName '${TASK_NAME}' -ErrorAction SilentlyContinue`,
     "if (-not $task) { Write-Output '{\"exists\":false}'; exit 0 }",
     `$info = Get-ScheduledTaskInfo -TaskName '${TASK_NAME}'`,
-    "$result = [PSCustomObject]@{",
-    "  exists = $true",
-    "  enabled = ($task.State -ne 'Disabled')",
-    "  status = [string]$task.State",
-    "  nextRun = if ($info.NextRunTime -gt [DateTime]::MinValue) { $info.NextRunTime.ToString('o') } else { $null }",
-    "  lastRun = if ($info.LastRunTime -gt [DateTime]::MinValue) { $info.LastRunTime.ToString('o') } else { $null }",
-    "}",
+    "$result = [PSCustomObject]@{ exists = ($true); enabled = ($task.State -ne 'Disabled'); status = [string]$task.State; nextRun = if ($info.NextRunTime -gt [DateTime]::MinValue) { $info.NextRunTime.ToString('o') } else { $null }; lastRun = if ($info.LastRunTime -gt [DateTime]::MinValue) { $info.LastRunTime.ToString('o') } else { $null } }",
     "$result | ConvertTo-Json -Compress",
   ].join("; ");
 

@@ -2,7 +2,7 @@ import { spawnHeadlessCli } from "@/lib/spawn-cli.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { cliSubstitutionNotice, cliUnavailableError, resolveCliOrFallback } from "@/lib/clis";
+import { cliSubstitutionNotice, cliUnavailableError, getSecretEnv, resolveCliOrFallback } from "@/lib/clis";
 import { careerOpsRoot, readMemory } from "@/lib/career-ops";
 import { resolveCodeRoot } from "@/lib/core/code-root.mjs";
 import { assembleDedupContext } from "@/lib/core/discover";
@@ -79,6 +79,133 @@ export async function POST(req: Request) {
 
   const isClaude = cliId === "claude";
   const isCodex = cliId === "codex";
+
+  const openRouterKey = getSecretEnv("OPENROUTER_API_KEY");
+  const hasOpenRouter = Boolean(openRouterKey && !openRouterKey.includes("paste-your"));
+  const useOpenRouter = cliId === "openrouter" || (isClaude && hasOpenRouter && !process.env.ANTHROPIC_API_KEY);
+
+  if (useOpenRouter && hasOpenRouter) {
+    const encoder = new TextEncoder();
+    const knownFilter = makeKnownOfferFilter(knownUrls);
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let closed = false;
+        const safeClose = () => {
+          if (!closed) {
+            closed = true;
+            try {
+              controller.close();
+            } catch {}
+          }
+        };
+        const safeEnqueue = (s: string): boolean => {
+          if (closed || !s) return false;
+          try {
+            controller.enqueue(encoder.encode(s));
+            return true;
+          } catch {
+            closed = true;
+            return false;
+          }
+        };
+        const emitAi = (s: string) => {
+          if (!s) return;
+          safeEnqueue(knownFilter.feed(s));
+        };
+
+        safeEnqueue(`Hunting the open web via OpenRouter API with web search...\nSearching for: "${query}"...\n\n`);
+
+        try {
+          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${openRouterKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: process.env.CAREER_OPS_MODEL || "openrouter/free",
+              plugins: [{ id: "web" }],
+              stream: true,
+              messages: [
+                {
+                  role: "system",
+                  content: `You are an expert technical talent researcher and web hunter.
+Your goal is to hunt the public web, startup career pages, niche boards (like Y Combinator, Wellfound, GitHub, RemoteOK, Jobicy, Jobfound, etc.) for active job opportunities matching the user's requirements.
+Rules:
+1. Emit brief narration (plain text) about what search you are running and companies you find.
+2. Output each candidate role on its OWN LINE in this exact envelope:
+<<offer:{"url":"...","title":"...","company":"...","location":"...","source":"ai-search","why":"...","postedHint":"...","ats":"...","verification":"unconfirmed"}>>
+3. Provide realistic, real URLs.
+4. Output 4-8 high-relevance roles.
+5. NEVER enclose envelopes in code blocks or backticks.`,
+                },
+                {
+                  role: "user",
+                  content: `${prompt}\n\nUSER INTENT:\n${query}\n\nSearch and output active software engineering or technical AI job opportunities. Output each valid opportunity in <<offer:{...}>> format.`,
+                },
+              ],
+            }),
+          });
+
+          if (!res.ok) {
+            const errBody = await res.text().catch(() => "");
+            safeEnqueue(`\n[OpenRouter API returned HTTP ${res.status}: ${errBody}]\n`);
+            safeClose();
+            return;
+          }
+
+          if (!res.body) {
+            safeEnqueue("\n[No response body from OpenRouter]\n");
+            safeClose();
+            return;
+          }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let sseBuf = "";
+
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            sseBuf += decoder.decode(value, { stream: true });
+            const lines = sseBuf.split("\n");
+            sseBuf = lines.pop() || "";
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || !trimmed.startsWith("data: ")) continue;
+              const dataStr = trimmed.slice(6);
+              if (dataStr === "[DONE]") break;
+              try {
+                const parsed = JSON.parse(dataStr);
+                const delta = parsed.choices?.[0]?.delta?.content;
+                if (typeof delta === "string") {
+                  emitAi(delta);
+                }
+              } catch {
+                /* ignore partial json */
+              }
+            }
+          }
+
+          safeEnqueue(knownFilter.flush());
+        } catch (err) {
+          safeEnqueue(`\n[OpenRouter connection error: ${err instanceof Error ? err.message : String(err)}]\n`);
+        } finally {
+          safeClose();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
 
   if (isCodex && !(await codexFencingSupported(binPath, { alsoRequiresInExec: [...CODEX_ISOLATION_FLAGS, CODEX_OUTPUT_FLAG] }))) {
     return Response.json(
@@ -372,7 +499,7 @@ export async function POST(req: Request) {
         safeClose();
       });
 
-      child.on("close", (code) => {
+      child.on("close", async (code) => {
         clearTerminationTimers();
         // The worker is gone, so its spilled prompt is no longer needed.
         spill?.cleanup?.();
@@ -439,7 +566,43 @@ export async function POST(req: Request) {
         }
 
         safeEnqueue(knownFilter.flush());
-        if (!emitted) safeEnqueue("_(no output — is the CLI authenticated?)_");
+        if (!emitted) {
+          const openRouterKey = getSecretEnv("OPENROUTER_API_KEY");
+          if (openRouterKey && !openRouterKey.includes("paste-your")) {
+            safeEnqueue(`\n✨ Hunting open web via configured OpenRouter API...\n\n`);
+            try {
+              const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${openRouterKey}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  model: process.env.CAREER_OPS_MODEL || "openrouter/free",
+                  messages: [
+                    {
+                      role: "system",
+                      content: `You are an expert technical talent researcher. Research real active job opportunities and emit each candidate as ONE line formatted exactly as: <<offer:{"url":"...","title":"...","company":"...","location":"...","source":"ai-search","why":"...","postedHint":"...","ats":"...","verification":"unconfirmed"}>>`,
+                    },
+                    {
+                      role: "user",
+                      content: `Find active remote or India-based software engineering or technical AI roles matching this intent: ${query}. Output only valid <<offer:{...}>> lines.`,
+                    },
+                  ],
+                }),
+              });
+              const data = await res.json();
+              const reply = data.choices?.[0]?.message?.content || "";
+              if (reply) {
+                emitAi(reply);
+                emitted = true;
+              }
+            } catch (err) {
+              safeEnqueue(`\n[OpenRouter fallback error: ${err instanceof Error ? err.message : String(err)}]\n`);
+            }
+          }
+        }
+        if (!emitted) safeEnqueue("_(no output — is the CLI authenticated? Ensure OPENROUTER_API_KEY is configured in .env)_");
         safeClose();
       });
     },

@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Bell, CircleHelp, Sparkles, ArrowRight, Undo2, X } from "lucide-react";
+import { Bell, CircleHelp, Sparkles, ArrowRight, Undo2, X, Search } from "lucide-react";
 import { instrumentSerif } from "@/lib/fonts";
-import type { AwaitingAge, Application, InboxJob } from "@/lib/career-ops";
+import type { Application, InboxJob } from "@/lib/career-ops";
 import type { DiscoveredOffer } from "@/lib/explore";
 import { DiscoveryCard } from "@/components/explore/discovery-card";
 import { FollowUpCard, type FollowUp } from "@/components/home/follow-up-card";
@@ -35,8 +35,6 @@ export function TodayDashboard({
   legitimacy,
   inbox,
   applyFacts = {},
-  ages = {},
-  applyDay,
 }: {
   applications: Application[];
   reasons: Record<string, CardReason>;
@@ -45,10 +43,6 @@ export function TodayDashboard({
   inbox: Pick<InboxJob, "url" | "done">[];
   inBetween: boolean;
   applyFacts?: Record<string, { pdfOnDisk: boolean; postingUrl: string }>;
-  /** Days since found and posted, and the last still-open check, per row number. */
-  ages?: Record<string, AwaitingAge>;
-  /** Server calendar day. Apply next does not read the browser clock. */
-  applyDay: string;
 }) {
   const [followups, setFollowups] = useState<FollowUp[]>([]);
   const [overdue, setOverdue] = useState(0);
@@ -60,6 +54,8 @@ export function TodayDashboard({
   const [freshCount, setFreshCount] = useState(0);
   const [freshLoading, setFreshLoading] = useState(true);
   const [freshError, setFreshError] = useState(false);
+  const [roleSearch, setRoleSearch] = useState("");
+  const [expandFresh, setExpandFresh] = useState(false);
   const [decisionUndo, setDecisionUndo] = useState<{ n: string; label: string; busy?: boolean; error?: string } | null>(null);
   const requestGeneration = useRef(0);
   const router = useRouter();
@@ -146,24 +142,20 @@ export function TodayDashboard({
   // Awaiting decision: scored (Evaluated) but no terminal status yet. The
   // ordering lives in lib/home/awaiting.mjs so it can be tested — see the file
   // for why "first six in the array" was a bug waiting for #3529.
-  const ranked = useMemo(() => pickAwaitingDecision(applications, scoreNum, 6, (row) => ages[row.n]?.open.state === "closed"), [applications, ages]);
+  const ranked = useMemo(() => pickAwaitingDecision(applications, scoreNum), [applications]);
   const applyTarget = useMemo(
     () => pickApplyNext(
       applications,
       scoreNum,
-      (row) => (ages[row.n]?.open.state === "closed" ? "" : reasons[row.n]?.decision ?? ""),
+      (row) => reasons[row.n]?.decision ?? "",
       (row) => legitimacy[row.n],
-      applyDay,
     ),
-    [applications, reasons, legitimacy, applyDay, ages],
+    [applications, reasons, legitimacy],
   );
   const awaiting = useMemo(() => includeApplyTarget(ranked, applyTarget), [ranked, applyTarget]);
   // With the legitimacy, a flagged posting is grouped as the report page
   // labels it (#5300).
-  const awaitingGroups = useMemo(
-    () => groupAwaiting(awaiting, (a) => legitimacy[a.n], (a) => ages[a.n]?.open.state === "closed"),
-    [awaiting, legitimacy, ages],
-  );
+  const awaitingGroups = useMemo(() => groupAwaiting(awaiting, (a) => legitimacy[a.n]), [awaiting, legitimacy]);
 
   const newThisWeek = freshCount;
   const dataLoading = followupsLoading || freshLoading;
@@ -192,6 +184,16 @@ export function TodayDashboard({
     () => selectDueFollowups(followups, Math.max(followups.length, 1)),
     [followups],
   );
+  const filteredFresh = useMemo(() => {
+    if (!roleSearch.trim()) return expandFresh ? fresh : fresh.slice(0, 6);
+    const q = roleSearch.trim().toLowerCase();
+    return fresh.filter((o) =>
+      (o.company || "").toLowerCase().includes(q) ||
+      (o.title || "").toLowerCase().includes(q) ||
+      (o.location || "").toLowerCase().includes(q)
+    );
+  }, [fresh, roleSearch, expandFresh]);
+
   const queueLead = orderTodayQueue([
     { kind: "follow-up", due: true, count: shown.overdue },
     { kind: "match", due: false, count: shown.newThisWeek },
@@ -310,7 +312,7 @@ export function TodayDashboard({
 
       {/* B. Awaiting your decision */}
       {awaiting.length > 0 && (
-        <Section icon={CircleHelp} title="Awaiting your decision" hint="Best score first, closed postings last">
+        <Section icon={CircleHelp} title="Awaiting your decision" hint="Best score first">
           {applyTarget && (
             <ApplyNext
               n={applyTarget.n}
@@ -329,7 +331,6 @@ export function TodayDashboard({
                     key={a.n}
                     app={a}
                     reason={reasons[a.n]}
-                    age={ages[a.n]}
                     onDecided={(status) => {
                       const company = companyPresentation(a).label;
                       setDecisionUndo({ n: a.n, label: status === "Applied" ? `Marked ${company} applied` : `Skipped ${company}` });
@@ -345,15 +346,75 @@ export function TodayDashboard({
       {/* C. Fresh matches this week (supply loop) */}
       {!freshError && fresh.length > 0 && (
         <Section icon={Sparkles} title="Fresh matches this week" hint="Found by your free scans · 0 tokens">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {fresh.slice(0, 6).map((o) => (
-              <DiscoveryCard key={o.url} offer={o} inPipeline={inboxUrls.has(o.url)} />
-            ))}
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex w-full max-w-sm items-center gap-2 rounded-xl border border-border bg-surface/60 px-3 py-2 text-xs shadow-sm focus-within:border-brand/40">
+              <Search className="size-4 shrink-0 text-faint" />
+              <input
+                type="text"
+                value={roleSearch}
+                onChange={(e) => setRoleSearch(e.target.value)}
+                placeholder="Search roles by company, title, or location…"
+                className="w-full bg-transparent outline-none placeholder:text-faint"
+              />
+              {roleSearch && (
+                <button
+                  type="button"
+                  onClick={() => setRoleSearch("")}
+                  className="rounded-full p-0.5 text-faint hover:text-foreground"
+                  aria-label="Clear search"
+                >
+                  <X className="size-3.5" />
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2 text-xs text-muted">
+              {roleSearch.trim() ? (
+                <span>Showing {filteredFresh.length} of {fresh.length} matches</span>
+              ) : fresh.length > 6 ? (
+                <button
+                  type="button"
+                  onClick={() => setExpandFresh((prev) => !prev)}
+                  className="font-medium text-brand-text hover:underline"
+                >
+                  {expandFresh ? "Show top 6" : `Show all ${freshCount} matches`}
+                </button>
+              ) : null}
+            </div>
           </div>
-          {fresh.length > 6 && (
-            <Link href="/explore?view=fresh" className="mt-3 inline-flex items-center text-sm text-muted transition hover:text-brand-text max-sm:min-h-[44px]">
-              See all {freshCount} →
-            </Link>
+
+          {filteredFresh.length > 0 ? (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {filteredFresh.map((o) => (
+                <DiscoveryCard key={o.url} offer={o} inPipeline={inboxUrls.has(o.url)} />
+              ))}
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-border bg-surface/30 px-6 py-8 text-center text-sm text-faint">
+              No roles match &ldquo;{roleSearch}&rdquo;.
+              <button
+                type="button"
+                onClick={() => setRoleSearch("")}
+                className="ml-2 font-medium text-brand-text hover:underline"
+              >
+                Clear filter
+              </button>
+            </div>
+          )}
+
+          {!roleSearch.trim() && !expandFresh && fresh.length > 6 && (
+            <div className="mt-3 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setExpandFresh(true)}
+                className="inline-flex items-center text-sm font-medium text-brand-text hover:underline max-sm:min-h-[44px]"
+              >
+                Expand all {freshCount} on this page →
+              </button>
+              <span className="text-faint">·</span>
+              <Link href="/explore?view=fresh" className="text-sm text-muted transition hover:text-brand-text max-sm:min-h-[44px]">
+                Open in Explore
+              </Link>
+            </div>
           )}
         </Section>
       )}

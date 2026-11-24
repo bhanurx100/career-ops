@@ -23,6 +23,7 @@ import { ScheduleJobAction } from "./schedule-job-action";
 // Same shape as core normalizeTextKey(s, " ") — never [^a-z0-9] (#2666).
 const norm = (s: string) => normalizeTextKey(s, " ");
 const CLI_NAMES: Record<string, string> = {
+  openrouter: "OpenRouter (API)",
   claude: "Claude Code",
   codex: "Codex",
   gemini: "Gemini CLI",
@@ -56,9 +57,19 @@ export function ExplorerView({
   useEffect(() => {
     try {
       const id = JSON.parse(localStorage.getItem("career-ops:config") || "{}").cliId || null;
-      setCli({ id, name: id ? CLI_NAMES[id] || id : undefined });
+      if (id) {
+        setCli({ id, name: CLI_NAMES[id] || id });
+      } else {
+        fetch("/api/clis")
+          .then((r) => r.json())
+          .then((d) => {
+            const first = d.clis?.find((c: { installed: boolean; id: string }) => c.installed)?.id || "openrouter";
+            setCli({ id: first, name: CLI_NAMES[first] || first });
+          })
+          .catch(() => setCli({ id: "openrouter", name: "OpenRouter (API)" }));
+      }
     } catch {
-      setCli({ id: null });
+      setCli({ id: "openrouter", name: "OpenRouter (API)" });
     }
   }, []);
 

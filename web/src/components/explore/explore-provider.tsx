@@ -479,8 +479,7 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
       cliId = null;
     }
     if (!cliId) {
-      setPhase("blocked");
-      return;
+      cliId = "openrouter";
     }
     const run = runs.current.start();
     runningRef.current = true;

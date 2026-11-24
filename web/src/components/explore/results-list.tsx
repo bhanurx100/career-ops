@@ -55,8 +55,16 @@ export function ResultsList({ offers }: { offers: EnrichedOffer[] }) {
 
   const view = useMemo(() => applyResultsView(offers, { query: q, hiddenBands, sort }), [offers, q, hiddenBands, sort]);
 
+  const PAGE_SIZE = 48;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [q, hiddenBands, sort]);
+
   // "Add all" acts on what is on screen, so a filter can't bulk-add rows the user can't see.
   const addable = view.filter((o) => !o.inPipeline && !o.evaluatedN && !added.has(o.url));
+  const renderedView = view.slice(0, visibleCount);
 
   useEffect(() => {
     if (!sortOpen) return;
@@ -213,10 +221,29 @@ export function ResultsList({ offers }: { offers: EnrichedOffer[] }) {
       </div>
 
       <div className={layout === "list" ? "flex flex-col gap-2" : "grid gap-3 sm:grid-cols-2 xl:grid-cols-3"}>
-        {view.map((o) => (
+        {renderedView.map((o) => (
           <DiscoveryCard key={o.url} offer={o} inPipeline={o.inPipeline} evaluatedN={o.evaluatedN} layout={layout === "list" ? "row" : "card"} />
         ))}
       </div>
+
+      {view.length > visibleCount && (
+        <div className="flex flex-wrap items-center justify-center gap-3 pt-6 pb-4">
+          <button
+            type="button"
+            onClick={() => setVisibleCount((c) => Math.min(view.length, c + PAGE_SIZE))}
+            className="inline-flex items-center gap-2 rounded-xl border border-border bg-surface px-5 py-2.5 text-sm font-medium text-foreground transition hover:border-brand/40 hover:text-brand-text shadow-sm"
+          >
+            Show more ({Math.min(PAGE_SIZE, view.length - visibleCount)} remaining)
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisibleCount(view.length)}
+            className="inline-flex items-center gap-2 rounded-xl border border-border/50 px-4 py-2.5 text-xs text-muted transition hover:border-brand/30 hover:text-foreground"
+          >
+            Show all ({view.length})
+          </button>
+        </div>
+      )}
 
       {view.length === 0 && (q.trim() || hiddenBands.size > 0 || !running) && (
         <p className="py-10 text-center text-sm text-faint">
