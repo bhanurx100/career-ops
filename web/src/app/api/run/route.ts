@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { cliSubstitutionNotice, cliUnavailableError, resolveCliOrFallback } from "@/lib/clis";
+import { cliSubstitutionNotice, cliUnavailableError, getSecretEnv, resolveCliOrFallback } from "@/lib/clis";
 import { localISODate } from "@/lib/followups";
 import { accumulateTokens, createAgentTextJoiner, isFatalGenericStderr, killMsForKind, noOutputError, timeoutMessage } from "@/lib/run-cli-support.mjs";
 import { spawnHeadlessCli } from "@/lib/spawn-cli.mjs";
@@ -43,7 +43,14 @@ export const maxDuration = 800; // a real oferta evaluation / pdf-mode CV tailor
 export async function POST(req: Request) {
   const body = await readJsonObject<{ kind?: string; input?: string; cliId?: string; brief?: unknown; evaluationSections?: unknown; ats?: unknown }>(req);
   if (!body) return new Response(JSON.stringify({ error: "bad json" }), { status: 400 });
-  const { kind = "evaluate", input, cliId: requestedCliId, brief } = body;
+  let { kind = "evaluate", input, cliId: requestedCliId, brief } = body;
+  const geminiKey = getSecretEnv("GEMINI_API_KEY");
+  const geminiModel = getSecretEnv("GEMINI_MODEL");
+  const openrouterKey = getSecretEnv("OPENROUTER_API_KEY");
+  if (!requestedCliId || requestedCliId === "claude") {
+    if (geminiKey) requestedCliId = "gemini";
+    else if (openrouterKey) requestedCliId = "openrouter";
+  }
   const evaluation = kind === "evaluate" ? parseEvaluationOptions(body.evaluationSections) : undefined;
   if (evaluation && !evaluation.ok) return Response.json({ error: evaluation.error }, { status: 400 });
   if (!input || !requestedCliId) {
@@ -288,12 +295,48 @@ export async function POST(req: Request) {
       fencing: { cliId, capabilities },
       root: careerOpsRoot(),
     });
-    child = spawnHeadlessCli(
-      binPath,
-      spill.args,
-      { cwd: careerOpsRoot(), env: process.env },
-      { cliId, capabilities },
-    );
+    const childEnv = { ...process.env };
+    if (geminiKey) childEnv.GEMINI_API_KEY = geminiKey;
+    if (geminiModel) childEnv.GEMINI_MODEL = geminiModel;
+    if (openrouterKey) childEnv.OPENROUTER_API_KEY = openrouterKey;
+    if (cliId === "gemini" && kind === "evaluate") {
+      const scriptPath = path.join(codeRoot, "gemini-eval.mjs");
+      const args = ["--posting-url", input, prefetchedJd || input];
+      child = spawn(process.execPath, [scriptPath, ...args], {
+        cwd: careerOpsRoot(),
+        env: childEnv,
+        windowsHide: true,
+      });
+    } else if (cliId === "openrouter" && kind === "evaluate") {
+      const scriptPath = path.join(codeRoot, "openrouter-runner.mjs");
+      const args = ["evaluate", input];
+      child = spawn(process.execPath, [scriptPath, ...args], {
+        cwd: careerOpsRoot(),
+        env: childEnv,
+        windowsHide: true,
+      });
+    } else if (cliId === "gemini" && kind === "pdf") {
+      const scriptPath = path.join(codeRoot, "gemini-tailor.mjs");
+      child = spawn(process.execPath, [scriptPath, input], {
+        cwd: careerOpsRoot(),
+        env: childEnv,
+        windowsHide: true,
+      });
+    } else if (cliId === "gemini") {
+      const scriptPath = path.join(codeRoot, "gemini-runner.mjs");
+      child = spawn(process.execPath, [scriptPath, prompt], {
+        cwd: careerOpsRoot(),
+        env: childEnv,
+        windowsHide: true,
+      });
+    } else {
+      child = spawnHeadlessCli(
+        binPath,
+        spill.args,
+        { cwd: careerOpsRoot(), env: process.env },
+        { cliId, capabilities },
+      );
+    }
     if (instructionFile) child.once("close", instructionFile.cleanup);
     if (spill.cleanup) child.once("close", spill.cleanup);
   } catch (e) {
@@ -723,6 +766,26 @@ export async function POST(req: Request) {
           const tail = reportFilter?.flush();
           if (tail) send({ type: "text", text: tail });
           const envelope = reportFilter?.result();
+
+          if ((cliId === "gemini" || cliId === "openrouter") && cleanExit && !sawError) {
+            const reportMatch = evaluationText.match(/reports[\\/](\d+)-/i);
+            const reportN = reportMatch ? parseInt(reportMatch[1], 10) : undefined;
+            send({ type: "status", label: "Report saved & tracker updated" });
+            send({ type: "done", tokens: lastTokens, costUsd: lastCostUsd, reportN: Number.isFinite(reportN) ? reportN : undefined });
+            return close();
+          }
+
+          if (cliId === "gemini" || cliId === "openrouter") {
+            const errDetail = stderrErrorSnippet || stderrBuf.trim() || "The evaluation model could not finish this run. Check API key/quota or paste the JD text directly.";
+            send({ type: "error", msg: `Evaluation failed: ${errDetail}` });
+            return close();
+          }
+
+          if (evaluationText.includes("Not logged in") || stderrBuf.includes("Not logged in")) {
+            send({ type: "error", msg: "Claude Code is not logged in. Run 'claude login' in terminal, or select Gemini / OpenRouter in the model switcher above." });
+            return close();
+          }
+
           const outcome = evaluateRunOutcome({
             envelope,
             noOutputMessage: noOutputMessage(),

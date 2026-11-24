@@ -58,7 +58,7 @@ const SAFE_COMPANY_NAME = /^[\p{L}\p{N} .,&'()+/-]+$/u;
 const ISO_DATE_RE = /^20\d{2}-\d{2}-\d{2}$/;
 
 /** The CV template every run falls back to, relative to the career-ops root. */
-export const BASE_CV_TEMPLATE = "templates/cv-template.html";
+export const BASE_CV_TEMPLATE = "templates/cv-template.jake.html";
 
 /**
  * The two shapes cv-templates.mjs can produce, and nothing wider.

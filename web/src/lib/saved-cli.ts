@@ -7,9 +7,13 @@ export function readSavedCliId(): string | null {
   try {
     const raw = localStorage.getItem(CONFIG_KEY);
     const id = raw ? JSON.parse(raw).cliId : "";
-    return typeof id === "string" && id ? id : null;
+    if (id === "claude") {
+      persistCliId("gemini");
+      return "gemini";
+    }
+    return typeof id === "string" && id ? id : "gemini";
   } catch {
-    return null;
+    return "gemini";
   }
 }
 
@@ -78,7 +82,18 @@ export async function resolveCliId(
   if (!Array.isArray(clis) || !clis.every(isCliEntry)) {
     // /api/clis unreachable, errored, or malformed — can't check. Trust the
     // saved id rather than stranding a working setup on a transient failure.
-    return saved;
+    return saved === "claude" ? "gemini" : saved;
+  }
+  // Never default to Claude if user has gemini or openrouter installed
+  if (saved === "claude") {
+    const gemini = clis.find((c) => c.id === "gemini" && c.installed);
+    const openrouter = clis.find((c) => c.id === "openrouter" && c.installed);
+    const replacement = gemini ? "gemini" : (openrouter ? "openrouter" : null);
+    if (replacement) {
+      persistCliId(replacement);
+      onStale?.("claude", replacement);
+      return replacement;
+    }
   }
   if (keepIfInstalled(saved, clis)) return saved;
   const fallback = keepIfInstalled(remembered, clis) || pickSoleInstalled(clis);

@@ -60,9 +60,10 @@ export type CliSpec = {
  * lives in a comment is a rule the next contributor may never read.
  */
 export const KNOWN: CliSpec[] = [
+  { id: "gemini", name: "Gemini (API Key / Free)", bin: "gemini", run: "gemini", url: "https://ai.google.dev", args: (p) => [p] },
+  { id: "openrouter", name: "OpenRouter (API Key)", bin: "openrouter", run: "openrouter", url: "https://openrouter.ai", args: (p) => [p] },
   { id: "claude", name: "Claude Code", bin: "claude", run: "claude -p", url: "https://claude.ai/code", args: (p) => ["-p", p], parseEvent: parseClaudeEvent, stderrIsFatal: isFatalClaudeStderr },
   { id: "codex", name: "Codex", bin: "codex", run: "codex exec", url: "https://github.com/openai/codex", args: (p) => ["exec", p], streamArgs: codexStreamArgs, parseEvent: parseCodexEvent, stderrIsFatal: isFatalCodexStderr },
-  { id: "gemini", name: "Gemini CLI", bin: "gemini", run: "gemini -p", url: "https://github.com/google-gemini/gemini-cli", args: (p) => ["-p", p] },
   { id: "opencode", name: "OpenCode", bin: "opencode", run: "opencode run", url: "https://opencode.ai", args: (p) => ["run", p] },
   { id: "pi", name: "Pi", bin: "pi", run: "pi -p", url: "https://github.com/earendil-works/pi", args: (p) => ["--no-session", "-p", p] },
   { id: "copilot", name: "GitHub Copilot CLI", bin: "copilot", run: "copilot -p", url: "https://docs.github.com/en/copilot/github-copilot-in-the-cli", args: (p) => ["-p", p] },
@@ -123,11 +124,51 @@ function binCandidates(bin: string): string[] {
   return [bin, ...exts.map((ext) => bin + ext)];
 }
 
+export function getSecretEnv(key: string): string | undefined {
+  try {
+    const root = careerOpsRoot();
+    const candidatePaths = [
+      path.join(root, ".env"),
+      path.join(root, "web", ".env"),
+      path.join(process.cwd(), ".env"),
+      path.join(process.cwd(), "..", ".env"),
+    ];
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        const content = fs.readFileSync(p, "utf8");
+        for (const line of content.split("\n")) {
+          const m = line.trim().replace(/\r$/, "").match(new RegExp(`^${key}=(.*)$`));
+          if (m) {
+            const val = m[1].trim().replace(/^['"`](.*)['"`]$/, "$1").replace(/^X-goog-api-key:\s*/i, "").trim();
+            if (val && !val.includes("paste-your")) return val;
+          }
+        }
+      }
+    }
+  } catch {}
+  if (process.env[key] && !process.env[key]?.includes("paste-your")) {
+    const val = process.env[key]!.trim().replace(/\r$/, "").replace(/^['"`](.*)['"`]$/, "$1").replace(/^X-goog-api-key:\s*/i, "").trim();
+    if (val && !val.includes("paste-your")) return val;
+  }
+  return undefined;
+}
+
 export function findBin(bin: string, dirs = searchDirs()): string | null {
+  if (bin === "openrouter") {
+    const key = getSecretEnv("OPENROUTER_API_KEY");
+    if (key) return "env:OPENROUTER_API_KEY";
+    return null;
+  }
+  if (bin === "gemini") {
+    const key = getSecretEnv("GEMINI_API_KEY");
+    if (key) return "env:GEMINI_API_KEY";
+  }
   for (const dir of dirs) {
     for (const candidate of binCandidates(bin)) {
       const p = path.join(dir, candidate);
       try {
+        const stat = fs.statSync(p);
+        if (!stat.isFile()) continue;
         fs.accessSync(p, fs.constants.X_OK);
         return p;
       } catch {
@@ -169,12 +210,20 @@ export type CliResolution = { spec: CliSpec; binPath: string; substitutedFrom: s
  * id, and running one CLI under another's fencing is the mismatch #2507 is about.
  */
 export function resolveCliOrFallback(id: string): CliResolution | null {
-  const direct = resolveCli(id);
-  if (direct) return { ...direct, substitutedFrom: null };
-  const pick = pickUsableCli(id, detectClis(), readRememberedCli(careerOpsRoot()));
+  let targetId = id;
+  if (!targetId || targetId === "claude") {
+    if (findBin("gemini")) {
+      targetId = "gemini";
+    } else if (findBin("openrouter")) {
+      targetId = "openrouter";
+    }
+  }
+  const direct = resolveCli(targetId);
+  if (direct) return { ...direct, substitutedFrom: targetId !== id ? id : null };
+  const pick = pickUsableCli(targetId, detectClis(), readRememberedCli(careerOpsRoot()));
   if (!pick.id) return null;
   const fallback = resolveCli(pick.id);
-  return fallback ? { ...fallback, substitutedFrom: pick.substitutedFrom } : null;
+  return fallback ? { ...fallback, substitutedFrom: pick.substitutedFrom || (targetId !== id ? id : null) } : null;
 }
 
 /** The notice a route shows when it ran a different CLI than the one it was sent. */
