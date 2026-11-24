@@ -5,7 +5,17 @@ import ReactMarkdown from "react-markdown";
 import { SkillGaps } from "@/components/skill-gaps";
 import remarkGfm from "remark-gfm";
 import { noMarkdownImages } from "@/lib/markdown-options.mjs";
-import { Check, Loader2, Upload } from "lucide-react";
+import {
+  Check,
+  Loader2,
+  Upload,
+  FileText,
+  ExternalLink,
+  Trash2,
+  RefreshCw,
+  CheckCircle2,
+  Sparkles,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import { CvIngest } from "@/components/cv/cv-ingest";
 import {
@@ -37,6 +47,77 @@ export function CvEditor() {
   const [state, dispatch] = useReducer(editorReducer, initialEditor());
   const [importing, setImporting] = useState(false);
   const [importSaving, setImportSaving] = useState(false);
+  const [masterResume, setMasterResume] = useState<{
+    exists: boolean;
+    filename?: string;
+    docId?: string;
+    size?: number;
+    mtimeMs?: number;
+  } | null>(null);
+  const [masterUploading, setMasterUploading] = useState(false);
+  const [masterActionMsg, setMasterActionMsg] = useState<string | null>(null);
+
+  const loadMasterResume = useCallback(() => {
+    fetch("/api/cv/master-resume")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && typeof data.exists === "boolean") {
+          setMasterResume(data);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadMasterResume();
+    window.addEventListener("co-cv-saved", loadMasterResume);
+    return () => window.removeEventListener("co-cv-saved", loadMasterResume);
+  }, [loadMasterResume]);
+
+  const handleMasterUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setMasterUploading(true);
+    setMasterActionMsg(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/cv/master-resume", { method: "POST", body: formData });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to update master resume");
+      setMasterActionMsg(data.message || `Master resume updated to ${file.name}`);
+      const cvRes = await fetch("/api/cv");
+      if (cvRes.ok) {
+        const cvData = await cvRes.json();
+        dispatch({ type: "loaded", content: cvData.content || "", exists: true, draft: readDraft() });
+      }
+      loadMasterResume();
+      window.dispatchEvent(new CustomEvent("co-cv-saved"));
+    } catch (err: any) {
+      setMasterActionMsg(`Error: ${err.message || "Failed to upload"}`);
+    } finally {
+      setMasterUploading(false);
+      e.target.value = "";
+    }
+  };
+
+  const handleMasterRemove = async () => {
+    if (!confirm("Are you sure you want to remove your master resume?")) return;
+    setMasterUploading(true);
+    setMasterActionMsg(null);
+    try {
+      const res = await fetch("/api/cv/master-resume", { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to remove master resume");
+      setMasterActionMsg("Master resume removed successfully.");
+      setMasterResume({ exists: false });
+      window.dispatchEvent(new CustomEvent("co-cv-saved"));
+    } catch (err: any) {
+      setMasterActionMsg(`Error: ${err.message || "Failed to remove"}`);
+    } finally {
+      setMasterUploading(false);
+    }
+  };
   const stateRef = useRef(state);
   const snapshotPriorRef = useRef(true);
   const runningRef = useRef(false);
@@ -230,6 +311,103 @@ export function CvEditor() {
           />
         </section>
       )}
+
+      {/* ── Active Master Resume Bar ── */}
+      <div className="mt-6 rounded-2xl border border-brand/30 bg-surface/80 p-4 shadow-sm backdrop-blur-sm">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-white shadow-sm">
+              <FileText className="h-4 w-4" />
+            </span>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold text-foreground text-sm">
+                  {masterResume?.exists
+                    ? `Master PDF: ${masterResume.filename || "Bhanuprasad_L_Resume.pdf"}`
+                    : "No Master Resume PDF active"}
+                </span>
+                {masterResume?.exists && (
+                  <>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-800 dark:text-emerald-400">
+                      <CheckCircle2 className="size-3" /> Original PDF Preserved
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-0.5 text-xs font-medium text-blue-800 dark:text-blue-400">
+                      <Sparkles className="size-3" /> Jake&apos;s Template (Active)
+                    </span>
+                  </>
+                )}
+              </div>
+              <p className="text-xs text-muted mt-0.5">
+                {masterResume?.exists
+                  ? "Original PDF is stored safely and never altered. Roles matching your background use this original PDF directly."
+                  : "Upload your resume (PDF) to lock your ground truth and keep your original PDF for applications."}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {masterResume?.exists ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() =>
+                    window.open(
+                      masterResume.docId
+                        ? `/api/documents?id=${masterResume.docId}`
+                        : "/documents/Bhanuprasad_L_Resume.pdf",
+                      "_blank"
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-brand/40"
+                >
+                  <ExternalLink className="size-3.5 text-brand" /> View PDF
+                </button>
+                <label className="cursor-pointer">
+                  <input
+                    type="file"
+                    accept=".pdf,.docx,.txt,.md"
+                    className="hidden"
+                    disabled={masterUploading}
+                    onChange={handleMasterUpload}
+                  />
+                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-brand/40 cursor-pointer">
+                    {masterUploading ? <Loader2 className="size-3.5 animate-spin text-brand" /> : <RefreshCw className="size-3.5" />}
+                    {masterUploading ? "Replacing…" : "Replace Resume"}
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  onClick={handleMasterRemove}
+                  disabled={masterUploading}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-surface px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/10 dark:text-red-400 disabled:opacity-50"
+                >
+                  <Trash2 className="size-3.5" /> Remove
+                </button>
+              </>
+            ) : (
+              <label className="cursor-pointer">
+                <input
+                  type="file"
+                  accept=".pdf,.docx,.txt,.md"
+                  className="hidden"
+                  disabled={masterUploading}
+                  onChange={handleMasterUpload}
+                />
+                <span className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-sm transition-colors hover:bg-brand/90 cursor-pointer">
+                  {masterUploading ? <Loader2 className="size-3.5 animate-spin" /> : <Upload className="size-3.5" />}
+                  {masterUploading ? "Uploading…" : "Add Master Resume (PDF)"}
+                </span>
+              </label>
+            )}
+          </div>
+        </div>
+
+        {masterActionMsg && (
+          <p className="mt-2 text-xs font-medium text-brand-text">
+            {masterActionMsg}
+          </p>
+        )}
+      </div>
 
       {state.phase === "loading" ? (
         <div className="mt-6 text-sm text-muted">Loading…</div>

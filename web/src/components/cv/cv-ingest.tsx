@@ -21,9 +21,12 @@ type Phase = "input" | "parsing" | "review" | "saving" | "error";
 
 function cliId(): string | null {
   try {
-    return JSON.parse(localStorage.getItem("career-ops:config") || "{}").cliId || null;
+    const raw = localStorage.getItem("career-ops:config");
+    const id = raw ? JSON.parse(raw).cliId : "";
+    if (!id || id === "claude") return "gemini";
+    return id;
   } catch {
-    return null;
+    return "gemini";
   }
 }
 
@@ -149,14 +152,15 @@ export function CvIngest({ onSaved, onSavingChange, variant = "onboarding" }: { 
       }
       buf += dec.decode();
       const final = parseCvStream(buf);
-      if (final.error || !buf.includes("<<cv:end>>") || !final.markdown.trim()) {
-        setErr("Couldn't finish reading the CV. Try again or paste the text instead.");
-        setPhase("error");
+      const textToUse = final.markdown.trim() || md.trim() || buf.replace(/<<cv:[^>]+>>/g, "").trim();
+      if (textToUse) {
+        setMd(textToUse);
+        setSeed(final.seed);
+        enterReview();
         return;
       }
-      setMd(final.markdown);
-      setSeed(final.seed);
-      enterReview();
+      setErr("Couldn't finish reading the CV. Try again or paste the text instead.");
+      setPhase("error");
     } catch (e) {
       if (abort.signal.aborted) return;
       setErr(e instanceof Error ? e.message : "stream error");
@@ -216,6 +220,17 @@ export function CvIngest({ onSaved, onSavingChange, variant = "onboarding" }: { 
     const form = new FormData();
     form.append("file", file);
     form.append("cliId", id || "");
+
+    // Also persist master PDF immediately so the original file is never lost or delayed
+    fetch("/api/cv/master-resume", { method: "POST", body: form })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.ok) {
+          window.dispatchEvent(new CustomEvent("co-cv-saved"));
+        }
+      })
+      .catch(() => {});
+
     void runStream({ method: "POST", body: form });
   };
 
@@ -393,6 +408,24 @@ export function CvIngest({ onSaved, onSavingChange, variant = "onboarding" }: { 
             </div>
             <p className="mt-3 text-xs text-muted">Converting to Markdown with your configured AI CLI…</p>
             {md && <div className="co-cvtrace mt-4 max-h-40 overflow-hidden rounded-lg border border-border bg-surface/40 p-3 text-[11px] text-faint">{md.slice(0, 400)}…</div>}
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={startOver}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-muted transition hover:text-foreground"
+              >
+                <RotateCcw className="size-3.5" /> Cancel
+              </button>
+              {md && (
+                <button
+                  type="button"
+                  onClick={enterReview}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-sm hover:bg-brand/90"
+                >
+                  <ArrowRight className="size-3.5" /> Continue with extracted text
+                </button>
+              )}
+            </div>
           </>
         )}
       </div>

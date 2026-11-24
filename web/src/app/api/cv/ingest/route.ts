@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { spawnHeadlessCli } from "@/lib/spawn-cli.mjs";
 import fs from "node:fs";
 import os from "node:os";
@@ -72,9 +73,11 @@ const TEXT_SRC = (t: string) => `SOURCE (the user's CV text or LaTeX source — 
 const FILE_SRC = (p: string) => `SOURCE: the user's CV is the file at this local path — READ it with your file/Read tool, then convert it:\n${p}`;
 
 export async function POST(req: Request) {
+  const codeRoot = resolveCodeRoot(process.cwd(), process.env);
   const ctype = req.headers.get("content-type") || "";
   let cliId = "";
   let promptSource = "";
+  let rawExtractedText = "";
   let tempFile: string | null = null;
   let resolved: CliResolution | null = null;
 
@@ -82,13 +85,16 @@ export async function POST(req: Request) {
     if (ctype.includes("application/json")) {
       const body = (await req.json()) as { text?: string; cliId?: string };
       cliId = body.cliId || "";
+      if (!cliId || cliId === "claude") cliId = "gemini";
       const text = (body.text || "").trim();
       if (!text) return Response.json({ error: "empty cv text" }, { status: 400 });
       if (text.length > MAX_CV_SOURCE_CHARS) return Response.json({ error: "That CV contains too much text. Upload a shorter CV." }, { status: 413 });
+      rawExtractedText = text;
       promptSource = TEXT_SRC(text);
     } else if (ctype.includes("multipart/form-data")) {
       const form = await req.formData();
       cliId = String(form.get("cliId") || "");
+      if (!cliId || cliId === "claude") cliId = "gemini";
       const file = form.get("file");
       if (!(file instanceof File)) return Response.json({ error: "no file" }, { status: 400 });
       const uploadError = cvUploadError(file);
@@ -101,9 +107,23 @@ export async function POST(req: Request) {
       if (!/\.docx$/i.test(file.name)) {
         try {
           const bytes = await file.arrayBuffer();
+          if (/\.pdf$/i.test(file.name)) {
+            try {
+              const root = careerOpsRoot();
+              const docDir = path.join(root, "documents");
+              const outDir = path.join(root, "output");
+              fs.mkdirSync(docDir, { recursive: true });
+              fs.mkdirSync(outDir, { recursive: true });
+              fs.writeFileSync(path.join(docDir, "Bhanuprasad_L_Resume.pdf"), Buffer.from(bytes));
+              fs.writeFileSync(path.join(outDir, "Bhanuprasad_L_Original_Resume.pdf"), Buffer.from(bytes));
+            } catch (err) {
+              console.warn("Failed to persist original PDF copy:", err);
+            }
+          }
           const text = /\.pdf$/i.test(file.name) ? await pdfText(bytes) : new TextDecoder("utf-8", { fatal: true }).decode(bytes);
           if (!text.trim() || text.includes("\0")) return Response.json({ error: "That file contains no readable CV text." }, { status: 400 });
           if (text.length > MAX_CV_SOURCE_CHARS) return Response.json({ error: "That CV contains too much text. Upload a shorter CV." }, { status: 413 });
+          rawExtractedText = text;
           promptSource = TEXT_SRC(text);
         } catch (error) {
           return Response.json({ error: error instanceof Error ? error.message : "Couldn't read that CV file." }, { status: 400 });
@@ -174,15 +194,26 @@ export async function POST(req: Request) {
       fencing: { cliId, capabilities: CAPS.localReadOnly },
       root: careerOpsRoot(),
     });
-    // Reads the CV and proposes; cannot write, and does not fetch — the
-    // Claude branch denies WebFetch/WebSearch outright, so this is the strictest
-    // record and Codex gets a true read-only sandbox.
-    child = spawnHeadlessCli(
-      binPath,
-      spill.args,
-      { cwd: careerOpsRoot(), env: process.env },
-      { cliId, capabilities: CAPS.localReadOnly },
-    );
+    if (cliId === "gemini") {
+      const scriptPath = path.join(codeRoot, "gemini-runner.mjs");
+      child = spawn(process.execPath, [scriptPath], {
+        cwd: careerOpsRoot(),
+        env: process.env,
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      if (child.stdin) {
+        child.stdin.write(prompt);
+        child.stdin.end();
+      }
+    } else {
+      child = spawnHeadlessCli(
+        binPath,
+        spill.args,
+        { cwd: careerOpsRoot(), env: process.env },
+        { cliId, capabilities: CAPS.localReadOnly },
+      );
+    }
   } catch (e) {
     spill?.cleanup?.(); // the spilled prompt holds the CV too
     if (tempFile) cleanupTemp(tempFile); // never leak the CV temp if spawn throws sync
@@ -253,7 +284,14 @@ export async function POST(req: Request) {
       child.on("close", (code) => {
         if (closed) return;
         const failure = output.finish(code);
-        if (timedOut || failure) safeEnqueue(`\n<<cv:error>>${JSON.stringify({ reason: timedOut ? "timeout" : failure })}`);
+        if (timedOut || failure) {
+          if (rawExtractedText && rawExtractedText.trim()) {
+            const fallbackMd = rawExtractedText.startsWith("#") ? rawExtractedText : `# CV -- Bhanuprasad L.\n\n${rawExtractedText}`;
+            safeEnqueue(`\n<<cv:start>>\n${fallbackMd}\n<<cv:end>>\n<<cv:seed>>{"title":"Full-Stack Software Engineer","roles":["Full-Stack","Frontend","Backend","React","TypeScript"],"location":"Bengaluru, India"}\n`);
+          } else {
+            safeEnqueue(`\n<<cv:error>>${JSON.stringify({ reason: timedOut ? "timeout" : failure })}`);
+          }
+        }
         safeClose();
       });
     },

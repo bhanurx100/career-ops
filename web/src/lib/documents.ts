@@ -167,7 +167,7 @@ export async function handleDocumentsRequest(
   root: string,
   manifestPath: string | null,
   isRegularContainedFile: (absPath: string, root: string) => boolean,
-  applications?: { n?: string; company?: string; role?: string; report?: string }[],
+  applications?: { n?: string; company?: string; role?: string; report?: string; status?: string; score?: string; date?: string; url?: string }[],
 ) {
   const url = new URL(req.url);
   const id = url.searchParams.get("id");
@@ -235,19 +235,47 @@ export async function handleDocumentsRequest(
 
   const payload = documents.map((doc) => {
     const presented = presentDocument(doc, applications);
+    const isOriginal = doc.filename.toLowerCase().includes("original") || doc.filename.toLowerCase().includes("bhanuprasad");
+    const matchedApp = applications?.find((a) => {
+      if (doc.reportId && a.report && a.report.includes(doc.reportId)) return true;
+      if (presented.company && a.company && a.company.toLowerCase() === presented.company.toLowerCase()) return true;
+      return false;
+    });
     return {
       id: encodeId(doc.filename),
       filename: doc.filename,
-      kind: doc.kind,
+      kind: isOriginal ? "original_cv" : doc.kind,
       date: doc.date,
       reportId: doc.reportId,
       format: doc.format,
       mtimeMs: doc.mtimeMs,
       company: presented.company,
       role: presented.role,
-      title: presented.title,
+      title: isOriginal ? "Master Resume (Original PDF)" : presented.title,
+      score: matchedApp?.score ?? null,
+      status: matchedApp?.status ?? null,
+      url: matchedApp?.url ?? null,
+      isOriginal,
     };
   });
+
+  if (url.searchParams.get("includeRoles") === "true") {
+    return Response.json({
+      documents: payload,
+      roles: (applications || []).map((a) => ({
+        n: a.n,
+        company: a.company,
+        role: a.role,
+        status: a.status,
+        score: a.score,
+        date: a.date,
+        url: a.url,
+        report: a.report,
+      })),
+    }, {
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
 
   return Response.json(payload, {
     headers: { "Cache-Control": "no-store" },

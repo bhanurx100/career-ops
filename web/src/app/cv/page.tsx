@@ -1,7 +1,7 @@
-import { CvEditor } from "@/components/cv-editor";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default function CvPage() {
-  return <CvEditor />;
+  redirect("/documents");
 }
