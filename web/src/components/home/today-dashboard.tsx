@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Bell, CircleHelp, Sparkles, ArrowRight, Undo2, X, Search } from "lucide-react";
 import { instrumentSerif } from "@/lib/fonts";
-import type { Application, InboxJob } from "@/lib/career-ops";
+import type { AwaitingAge, Application, InboxJob } from "@/lib/career-ops";
 import type { DiscoveredOffer } from "@/lib/explore";
 import { DiscoveryCard } from "@/components/explore/discovery-card";
 import { FollowUpCard, type FollowUp } from "@/components/home/follow-up-card";
@@ -35,6 +35,8 @@ export function TodayDashboard({
   legitimacy,
   inbox,
   applyFacts = {},
+  ages = {},
+  applyDay = "",
 }: {
   applications: Application[];
   reasons: Record<string, CardReason>;
@@ -43,6 +45,10 @@ export function TodayDashboard({
   inbox: Pick<InboxJob, "url" | "done">[];
   inBetween: boolean;
   applyFacts?: Record<string, { pdfOnDisk: boolean; postingUrl: string }>;
+  /** Days since found and posted, and the last still-open check, per row number. */
+  ages?: Record<string, AwaitingAge>;
+  /** Server calendar day. Apply next does not read the browser clock. */
+  applyDay?: string;
 }) {
   const [followups, setFollowups] = useState<FollowUp[]>([]);
   const [overdue, setOverdue] = useState(0);
