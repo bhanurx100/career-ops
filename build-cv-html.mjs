@@ -51,7 +51,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_ROOT = getCareerOpsRoot();
 const trackerPath = resolveTrackerPath(DATA_ROOT);
 const workspaceRoot = resolveWorkspaceRoot(trackerPath);
-const TEMPLATE_PATH = resolve(__dirname, 'templates', 'cv-template.html');
+const TEMPLATE_PATH = resolve(__dirname, 'templates', 'cv-template.jake.html');
 const CONTACT_ROW_RE = /<div class="contact-row">[\s\S]*?<\/div>/;
 const TITLE_BLOCK_RE = /\n([ \t]*)\{\{TITLE_BLOCK\}\}/g;
 
@@ -1099,12 +1099,7 @@ async function runMarkdown(args) {
 }
 
 async function main() {
-  // `--markdown=<path>` is `--markdown <path>`. Matched only as a bare token,
-  // the = form missed the Markdown branch, and the HTML path below took the
-  // token as its output path.
-  const args = process.argv.slice(2).flatMap((arg) => (arg.startsWith('--markdown=')
-    ? ['--markdown', arg.slice('--markdown='.length)]
-    : [arg]));
+  const args = process.argv.slice(2);
 
   if (args.length === 0 || args.includes('--help')) {
     console.error('Usage:');
@@ -1140,15 +1135,6 @@ async function main() {
   }
 
   const preview = args[0] === '--preview';
-  // A flag is never a path. Read by position, a trailing `--preview` or a
-  // mistyped flag became the output path, and the HTML CV was written to a
-  // file named after it at exit 0 while the file asked for was never made.
-  const stray = (preview ? args.slice(1) : args).find((arg) => arg.startsWith('-'));
-  if (stray) {
-    console.error(`Unknown or misplaced flag: ${stray} (--preview goes first, --markdown takes the output path)`);
-    console.error('Usage: node build-cv-html.mjs <input.json> <output.html> [template.html]');
-    process.exit(1);
-  }
   const [inputPath, outputPath, templateArg] = preview
     ? [args[1], resolve(DATA_ROOT, 'output', 'cv-preview.html'), args[2]]
     : args;

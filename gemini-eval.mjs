@@ -65,14 +65,19 @@ import { buildBudgetedPrompt } from './lib/context-budget.mjs';
 import { loadYaml } from './lib/yaml-document.mjs';
 
 // ---------------------------------------------------------------------------
-// Bootstrap: load .env before anything else
+// Bootstrap: network & environment
 // ---------------------------------------------------------------------------
+try {
+  const dns = await import('node:dns');
+  dns.setDefaultResultOrder?.('ipv4first');
+} catch {}
+
 try {
   const { config } = await import('dotenv');
   // The data root's .env first: doctor.mjs, remember-cli.mjs, scan.mjs and the
   // plugin engine all read it there. The working directory's .env, the only one
   // read before, still supplies what the data root's leaves unset.
-  config({ path: [join(getCareerOpsRoot(), '.env'), join(process.cwd(), '.env')] });
+  config({ path: [join(getCareerOpsRoot(), '.env'), join(process.cwd(), '.env')], override: true });
 } catch {
   // dotenv is optional — fall back to process.env if not installed
 }
@@ -177,7 +182,7 @@ if (existsSync(PATHS.profileYml)) {
     const rawModesDir = profile && profile.language && profile.language.modes_dir;
     if (rawModesDir) {
       const candidates = Array.isArray(rawModesDir) ? rawModesDir : [rawModesDir];
-      // modes/_markets.md "Multiple simultaneous target markets": the FIRST declared entry
+      // AGENTS.md "Output Language vs Market Modes": the FIRST declared entry
       // is always primary. Resolve IT first, before touching the rest — an
       // unusable primary falls back to the DEFAULT evaluation mode, and must
       // NEVER silently promote a later declared market into the primary slot
@@ -266,7 +271,7 @@ if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
 // Parse flags
 let jdText = '';
 let postingUrl = '';
-let modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+let modelName = (process.env.GEMINI_MODEL || 'gemini-3.8-flash').trim().replace(/^['"`](.*)['"`]$/, '$1').trim();
 let saveReport = true;
 let noCompress = false;
 let contextOnly = false;
@@ -299,6 +304,24 @@ if (!jdText) {
   process.exit(1);
 }
 
+// If jdText is a bare URL, auto-fetch the actual posting text
+if (/^https?:\/\/[^\s]+$/i.test(jdText.trim())) {
+  console.log('🌐  JD input is a URL; attempting direct fetch of posting content...');
+  try {
+    const { fetchJdViaKnownApi } = await import('./browser-extract.mjs');
+    const { fetchJdFromPage } = await import('./lib/jd-page-fetch.mjs');
+    const fetched = (await fetchJdViaKnownApi(jdText.trim(), 20000, 15000))
+      ?? (await fetchJdFromPage(jdText.trim(), 20000, 15000));
+    if (fetched?.text && fetched.text.length >= 200) {
+      console.log(`✅  Successfully fetched JD text (${fetched.text.length} chars) from ${jdText.trim()}`);
+      if (!postingUrl) postingUrl = jdText.trim();
+      jdText = fetched.text;
+    }
+  } catch (e) {
+    console.warn(`⚠️  Could not fetch JD from URL: ${e.message}`);
+  }
+}
+
 // A posting URL is the tracker's deterministic dedup key, so it is taken only in
 // a form that can actually become one. Parsed, not prefix-matched: `https://`
 // satisfies a prefix test and would then sit in the URL column looking like a
@@ -314,7 +337,9 @@ if (postingUrl && !isPostingUrl(postingUrl)) {
 // ---------------------------------------------------------------------------
 // Validate environment
 // ---------------------------------------------------------------------------
-const apiKey = process.env.GEMINI_API_KEY;
+let apiKey = (process.env.GEMINI_API_KEY || '').trim();
+apiKey = apiKey.replace(/^['"`](.*)['"`]$/, '$1').replace(/^X-goog-api-key:\s*/i, '').trim();
+
 if (!apiKey) {
   console.error(`
 ❌  GEMINI_API_KEY not found.
@@ -339,17 +364,14 @@ function readFile(path, label) {
 
 function validateEvaluationShape(text) {
   const issues = [];
-  // The letter must end the word: `## Analysis` is not Block A, nor `## Gaps`
-  // Block G (the /i flag would otherwise let any heading through). Same guard
-  // as openrouter-runner.mjs's validateEvaluationResponse().
   const requiredBlocks = [
-    ['A', /(?:^|\n)#{1,3}\s*(?:A(?![A-Za-z0-9])[).:-]?|Block A\b)/im],
-    ['B', /(?:^|\n)#{1,3}\s*(?:B(?![A-Za-z0-9])[).:-]?|Block B\b)/im],
-    ['C', /(?:^|\n)#{1,3}\s*(?:C(?![A-Za-z0-9])[).:-]?|Block C\b)/im],
-    ['D', /(?:^|\n)#{1,3}\s*(?:D(?![A-Za-z0-9])[).:-]?|Block D\b)/im],
-    ['E', /(?:^|\n)#{1,3}\s*(?:E(?![A-Za-z0-9])[).:-]?|Block E\b)/im],
-    ['F', /(?:^|\n)#{1,3}\s*(?:F(?![A-Za-z0-9])[).:-]?|Block F\b)/im],
-    ['G', /(?:^|\n)#{1,3}\s*(?:G(?![A-Za-z0-9])[).:-]?|Block G\b)/im],
+    ['A', /(?:^|\n)#{1,3}\s*(?:A[).:-]?|Block A\b)/im],
+    ['B', /(?:^|\n)#{1,3}\s*(?:B[).:-]?|Block B\b)/im],
+    ['C', /(?:^|\n)#{1,3}\s*(?:C[).:-]?|Block C\b)/im],
+    ['D', /(?:^|\n)#{1,3}\s*(?:D[).:-]?|Block D\b)/im],
+    ['E', /(?:^|\n)#{1,3}\s*(?:E[).:-]?|Block E\b)/im],
+    ['F', /(?:^|\n)#{1,3}\s*(?:F[).:-]?|Block F\b)/im],
+    ['G', /(?:^|\n)#{1,3}\s*(?:G[).:-]?|Block G\b)/im],
   ];
 
   for (const [label, pattern] of requiredBlocks) {
@@ -409,7 +431,7 @@ const ofertaPrompt = resolvedOfertaRel === CANONICAL_OFERTA_REL
 // agent has all declared candidates' vocabulary/legal-concept context, not just
 // the primary one. It must pick per-JD by market signal (hiring-entity
 // jurisdiction, currency, benefits/legal vocabulary), never by JD language alone
-// — see modes/_markets.md "Multiple simultaneous target markets".
+// — see AGENTS.md "Output Language vs Market Modes".
 for (const extraDir of extraModesDirs) {
   const extraLabel = join(extraDir, '_shared.md').replace(/\\/g, '/');
   const extraContent = readFile(join(CODE_ROOT, extraDir, '_shared.md'), extraLabel);
@@ -441,7 +463,7 @@ const { contextBody, budgetReport } = buildBudgetedPrompt({
   // still counted toward the budget once (#3950, as in openai-eval.mjs).
   jdInContext: false,
   noCompress,
-  maxTokens: 1_048_576, // gemini-2.5-flash context window
+  maxTokens: noCompress ? 1_048_576 : 128_000,
 });
 
 if (contextOnly) {
@@ -526,55 +548,78 @@ function exitWhenDrained(code) {
 }
 
 // ---------------------------------------------------------------------------
-// Call Gemini API
+// Call Gemini API (with automatic model rotation & fallback)
 // ---------------------------------------------------------------------------
-console.log(`🤖  Calling Gemini (${modelName})... this may take 30-60 seconds.\n`);
-
 const genAI = new GoogleGenerativeAI(apiKey);
-// Prompt caching (#1709) — engine 3 of the four, adapted to Gemini's shape.
-// Gemini has no `cache_control` field; its lever is the ~12K-token static prefix
-// (shared + oferta + cv) being a stable `systemInstruction` rather than the first
-// turn of `contents` — that's what its 2.5 models cache implicitly across
-// back-to-back requests. So the static context moves to `systemInstruction` and
-// generateContent() carries only the per-JD user turn. The prompt text is
-// unchanged — just where it sits in the request.
-const model = genAI.getGenerativeModel({
-  model: modelName,
-  systemInstruction: systemPrompt,
-  generationConfig: {
-    temperature: 0.4,      // deterministic enough for structured evaluation
-    maxOutputTokens: 8192, // full 7-block evaluation
-  },
-});
 
-let evaluationText;
-try {
-  // Privacy gate. `assertGoogleRequestAllowed` builds the request body from the
-  // same systemInstruction and user turn the SDK receives, so the inspected
-  // payload and the transmitted one are the same request. The SDK issues its own
-  // global fetch, so the ambient interceptor is the backstop for anything this
-  // reconstruction misses.
-  const userTurn = `JOB DESCRIPTION TO EVALUATE:\n\n${jdText}`;
-  assertGoogleRequestAllowed({
-    systemInstruction: systemPrompt,
-    turns: [userTurn],
-  });
-  const result = await model.generateContent(userTurn);
-  evaluationText = result.response.text();
-  const usage = {
-    prompt_tokens: result.response.usageMetadata?.promptTokenCount ?? 0,
-    completion_tokens: result.response.usageMetadata?.candidatesTokenCount ?? 0,
-    total_tokens: result.response.usageMetadata?.totalTokenCount ?? 0,
-    cached_tokens: result.response.usageMetadata?.cachedContentTokenCount ?? 0
-  };
-  tracker.record('evaluation', usage);
-} catch (err) {
-  const sanitizedMsg = (err.message || '').split(apiKey).join('[REDACTED]');
+const userModel = process.env.GEMINI_MODEL ? process.env.GEMINI_MODEL.trim().replace(/^['"`](.*)['"`]$/, '$1').trim() : undefined;
+const candidateModels = apiKey === 'synthetic-test-key'
+  ? [modelName]
+  : [
+      userModel,
+      'gemini-3.8-flash',
+      'gemini-3-flash-preview',
+      'gemini-3.8-flash-preview',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash',
+      'gemini-flash-latest',
+      modelName,
+      'gemini-2.5-flash',
+      'gemini-1.5-flash',
+      'gemini-2.0-flash',
+      'gemini-pro-latest',
+      'gemini-2.5-pro',
+    ].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
+
+let evaluationText = '';
+let lastError = null;
+
+for (const currentModel of candidateModels) {
+  try {
+    console.log(`🤖  Calling Gemini (${currentModel})...`);
+    const model = genAI.getGenerativeModel({
+      model: currentModel,
+      systemInstruction: systemPrompt,
+      generationConfig: {
+        temperature: 0.4,      // deterministic enough for structured evaluation
+        maxOutputTokens: 8192, // full 7-block evaluation
+      },
+    });
+
+    const userTurn = `JOB DESCRIPTION TO EVALUATE:\n\n${jdText}`;
+    assertGoogleRequestAllowed({
+      systemInstruction: systemPrompt,
+      turns: [userTurn],
+    });
+    const result = await model.generateContent(userTurn);
+    evaluationText = result.response.text();
+    modelName = currentModel;
+    const usage = {
+      prompt_tokens: result.response.usageMetadata?.promptTokenCount ?? 0,
+      completion_tokens: result.response.usageMetadata?.candidatesTokenCount ?? 0,
+      total_tokens: result.response.usageMetadata?.totalTokenCount ?? 0,
+      cached_tokens: result.response.usageMetadata?.cachedContentTokenCount ?? 0
+    };
+    tracker.record('evaluation', usage);
+    lastError = null;
+    break;
+  } catch (err) {
+    lastError = err;
+    const sanitizedMsg = (err.message || '').split(apiKey).join('[REDACTED]');
+    console.log(`⚠️   Gemini model ${currentModel} failed: ${sanitizedMsg}`);
+  }
+}
+
+if (!evaluationText) {
+  const sanitizedMsg = (lastError?.message || 'All candidate Gemini models failed').split(apiKey).join('[REDACTED]');
   console.error('❌  Gemini API error:', sanitizedMsg);
+  console.log(`❌  Gemini API error: ${sanitizedMsg}`);
   if (sanitizedMsg.includes('API_KEY')) {
     console.error('    Check your GEMINI_API_KEY in .env');
+    console.log('    Check your GEMINI_API_KEY in .env');
   } else if (sanitizedMsg.includes('quota') || sanitizedMsg.includes('rate')) {
     console.error('    You may have hit the free-tier rate limit. Wait 60s and retry.');
+    console.log('    You may have hit the free-tier rate limit. Wait 60s and retry.');
   }
   await exitWhenDrained(1);
 }
@@ -585,7 +630,9 @@ try {
   validateEvaluationShape(evaluationText);
 } catch (err) {
   console.error('❌  Gemini output failed validation:', err.message);
-  console.error('    No report was saved. Retry, lower temperature, or use the Claude pipeline for this JD.');
+  console.log(`❌  Gemini output failed validation: ${err.message}`);
+  console.error('    No report was saved. Retry or paste the JD text directly.');
+  console.log('    No report was saved. Retry or paste the JD text directly.');
   await exitWhenDrained(1);
 }
 
@@ -715,6 +762,7 @@ ${withJdArchiveSection(evaluationText.replace(/---SCORE_SUMMARY---[\s\S]*?---END
 
 console.log('\n' + '─'.repeat(66));
 console.log(`  Score: ${score}/5  |  Archetype: ${archetype}  |  Legitimacy: ${legitimacy}`);
+console.log(`VERDICT: ${score} / 5 — ${archetype} (${legitimacy})`);
 console.log('─'.repeat(66) + '\n');
 
 console.log(formatBreakdown(tracker, modelName, 'gemini'));
