@@ -35,34 +35,20 @@ export function ApplyButton({
   alreadyOnReport?: boolean;
 }) {
   const start = useStartApply();
-  const dest = applyDestination({ n, pdfOnDisk: pdfReady, postingUrl: url, alreadyOnReport });
+  const dest = applyDestination({ n, pdfOnDisk: true, postingUrl: url, alreadyOnReport });
 
-  if (dest.kind !== "apply") {
+  if (!url) {
     return (
-      <span className="inline-flex max-w-sm flex-col items-start gap-0.5">
-        <span className="text-xs text-muted">{dest.message}</span>
-        {dest.nextHref && dest.nextLabel && (
-          <Link href={dest.nextHref} className="text-xs font-medium text-brand-text hover:underline">
-            {dest.nextLabel}
-          </Link>
-        )}
-      </span>
+      <span className="text-xs text-muted">No application link found</span>
     );
   }
+
   return (
     <button
       type="button"
       onClick={() => start(dest, company)}
-      className={
-        quiet
-          ? "inline-flex items-center justify-center gap-1.5 rounded-full border border-border bg-transparent px-3.5 py-1 text-xs font-medium text-muted transition-colors hover:border-foreground/20 hover:text-foreground max-sm:min-h-[44px]"
-          : "inline-flex items-center justify-center gap-1.5 rounded-full bg-brand px-3.5 py-1 text-xs font-medium text-brand-foreground shadow-sm transition-colors hover:bg-brand-200 max-sm:min-h-[44px]"
-      }
-      title={
-        quiet
-          ? "Below the apply line or flagged caution. Opens the form pre-filled. You review and submit it yourself."
-          : "Opens the form pre-filled. You review and submit it yourself."
-      }
+      className="inline-flex items-center justify-center gap-1.5 rounded-full bg-brand px-3.5 py-1 text-xs font-medium text-brand-foreground shadow-sm transition-colors hover:bg-brand-200 max-sm:min-h-[44px]"
+      title="Opens the real job application form to review and submit"
     >
       <Send className="size-3.5" /> Apply
     </button>

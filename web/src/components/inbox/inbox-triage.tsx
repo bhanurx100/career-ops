@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Undo2 } from "lucide-react";
+import { Undo2, RotateCcw, Trash2, CheckSquare, Sparkles, Cpu } from "lucide-react";
 import { evaluationGateForJob } from "@/lib/job-gate.mjs";
 import { useJobs } from "@/components/jobs/job-store";
 import type { InboxJob } from "@/lib/career-ops";
@@ -21,6 +21,7 @@ import { estimateRunCost } from "@/lib/run-cost-estimate.mjs";
 import { createInboxSkipActions, queueInboxSkip, reportSkipRejections, restoreSkippedUrls } from "@/lib/inbox-skip-client.mjs";
 import { useEvaluationOptions } from "@/components/evaluation-options";
 import { CONFIG_KEY, subscribeConfig } from "@/lib/config-events.mjs";
+import { persistCliId } from "@/lib/saved-cli";
 import { DEFAULT_INBOX_SORT, INBOX_SORT_STORAGE_KEY, readInboxSort, writeInboxSort } from "@/lib/inbox-sort-pref.mjs";
 
 const SHORTLIST_KEY = "career-ops:shortlist";
@@ -71,8 +72,52 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
   const [undo, setUndo] = useState<UndoNotice | null>(null);
   const [writeError, setWriteError] = useState("");
   const [restoring, setRestoring] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [hasCli, setHasCli] = useState(false);
+  const [clis, setClis] = useState<{ id: string; name: string; installed: boolean }[]>([]);
+  const [activeCli, setActiveCli] = useState<string>("gemini");
+  const [autoTailorCv, setAutoTailorCv] = useState(true);
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const handleJobDone = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.kind === "evaluate" && detail?.reportN && autoTailorCv) {
+        startJob({
+          title: `Generate CV · ${detail.title ? detail.title.replace(/^Score\s*·\s*/, "") : "Role"}`,
+          subtitle: detail.subtitle,
+          kind: "pdf",
+          input: String(detail.reportN),
+          page: "/pipeline",
+        });
+      }
+    };
+    window.addEventListener("co-job-done", handleJobDone);
+    return () => window.removeEventListener("co-job-done", handleJobDone);
+  }, [autoTailorCv, startJob]);
+
+  const handleReset = async () => {
+    if (!window.confirm("Are you sure you want to reset all scan history and inbox offers? This allows a 100% clean rescan with your updated filters. A backup (.bak) will be created.")) return;
+    setResetting(true);
+    try {
+      const res = await fetch("/api/pipeline/reset", { method: "POST" });
+      const data = await res.json();
+      if (data.ok) {
+        router.refresh();
+        window.location.href = "/explore";
+      } else {
+        alert("Failed to reset: " + (data.error || "Unknown error"));
+      }
+    } catch (e) {
+      alert("Error resetting pipeline: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const selectAllVisible = () => {
+    setSelected(new Set(visible.map((v) => v.job.url)));
+  };
 
   useEffect(() => {
     const saved = readInboxSort(browserStorage());
@@ -108,12 +153,20 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
     function read() {
       try {
         const raw = localStorage.getItem(CONFIG_KEY);
-        setHasCli(!!(raw && JSON.parse(raw).cliId));
+        const saved = raw ? JSON.parse(raw).cliId : "";
+        setActiveCli(saved || "gemini");
+        setHasCli(!!saved);
       } catch {
         setHasCli(false);
       }
     }
     read();
+    fetch("/api/clis")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.clis) setClis(d.clis.filter((c: { installed: boolean }) => c.installed));
+      })
+      .catch(() => {});
     return subscribeConfig(window, read);
   }, []);
   useEffect(() => {
@@ -164,7 +217,17 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
     }
     const m = new Map<string, RowScore>();
     for (const [url, j] of best) {
-      m.set(url, { score: j.result?.score ?? null, tone: j.result?.tone ?? "muted", jobId: j.id, running: j.status === "running", reportN: j.reportN, needsReview: j.status === "gated" || Boolean(evaluationGateForJob(j)) });
+      const isError = j.status === "error";
+      const lastStep = j.steps[j.steps.length - 1]?.label;
+      m.set(url, {
+        score: j.result?.score ?? null,
+        tone: j.result?.tone ?? (isError ? "bad" : "muted"),
+        jobId: j.id,
+        running: j.status === "running",
+        error: isError ? (lastStep || "Evaluation failed") : null,
+        reportN: j.reportN,
+        needsReview: j.status === "gated" || Boolean(evaluationGateForJob(j)),
+      });
     }
     return m;
   }, [jobs]);
@@ -333,6 +396,59 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
     skipUrls(jobs, `Skipped ${jobs.length}`);
   };
 
+  const handleSwitchCli = (newId: string) => {
+    setActiveCli(newId);
+    persistCliId(newId);
+  };
+
+  const evaluateOne = (job: InboxJob) => {
+    startJob({
+      title: `Score · ${job.company}`,
+      subtitle: job.role,
+      kind: "evaluate",
+      input: job.url,
+      page: "/pipeline",
+      evaluationSections: sections,
+    });
+  };
+
+  const scoreSelected = () => {
+    const add = enriched
+      .filter((e) => selected.has(e.job.url))
+      .map((e) => ({ url: e.job.url, company: e.job.company, role: e.job.role }));
+    if (add.length === 0) return;
+    const batchId = `selected-${Date.now()}`;
+    for (const it of add) {
+      startJob({
+        title: `Score · ${it.company}`,
+        subtitle: it.role,
+        kind: "evaluate",
+        input: it.url,
+        page: "/pipeline",
+        batchId,
+        evaluationSections: sections,
+      });
+    }
+    setSelected(new Set());
+  };
+
+  const scoreAllVisible = () => {
+    if (visible.length === 0) return;
+    const batchId = `all-${Date.now()}`;
+    for (const v of visible) {
+      startJob({
+        title: `Score · ${v.job.company}`,
+        subtitle: v.job.role,
+        kind: "evaluate",
+        input: v.job.url,
+        page: "/pipeline",
+        batchId,
+        evaluationSections: sections,
+      });
+    }
+    setSelected(new Set());
+  };
+
   const keyActions = useRef({
     save, skip, skipSelected, selectedSize: selected.size, visible, cursor, capped, orderedLength: ordered.length, scoreByUrl,
   });
@@ -421,11 +537,46 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
       {/* Keep recovery mounted when the last Skip refreshes to an empty inbox. */}
       <div hidden={inbox.length === 0}>
       {/* batch header: fresh/filtered slice by default; "See all" lifts the cap */}
-      <div ref={listTopRef} className="mt-4 flex items-baseline justify-between gap-3">
-        <p className="text-sm font-medium text-foreground">
-          {anyFacet ? `${filtered.length} match${filtered.length === 1 ? "" : "es"}` : capped ? (sortMode === "newest" ? "Fresh — worth a look" : "Best fits") : "All roles"}
-        </p>
-        <div className="flex items-center gap-3">
+      <div ref={listTopRef} className="mt-4 flex flex-wrap items-baseline justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <p className="text-sm font-medium text-foreground">
+            {anyFacet ? `${filtered.length} match${filtered.length === 1 ? "" : "es"}` : capped ? (sortMode === "newest" ? "Fresh — worth a look" : "Best fits") : "All roles"}
+          </p>
+          {/* Active AI model selector */}
+          <div className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface/70 px-2.5 py-1 text-xs">
+            <Cpu className="size-3.5 text-brand-text" />
+            <span className="text-faint">Model:</span>
+            <select
+              value={activeCli}
+              onChange={(e) => handleSwitchCli(e.target.value)}
+              className="bg-transparent font-medium text-foreground outline-none cursor-pointer"
+            >
+              {clis.map((c) => (
+                <option key={c.id} value={c.id} className="bg-surface text-foreground">
+                  {c.name}
+                </option>
+              ))}
+              {clis.length === 0 && (
+                <option value="gemini" className="bg-surface text-foreground">
+                  Gemini (API Key)
+                </option>
+              )}
+            </select>
+          </div>
+
+          {/* Auto-tailor CV toggle */}
+          <label className="inline-flex items-center gap-1.5 text-xs text-muted cursor-pointer hover:text-foreground bg-surface/70 border border-border px-2.5 py-1 rounded-lg">
+            <input
+              type="checkbox"
+              checked={autoTailorCv}
+              onChange={(e) => setAutoTailorCv(e.target.checked)}
+              className="rounded border-border accent-brand size-3.5"
+            />
+            <Sparkles className="size-3 text-amber-500" />
+            <span>Auto-create CV (PDF)</span>
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
           <div role="group" aria-label="Sort inbox" className="flex items-center gap-2 text-xs">
             <button type="button" aria-pressed={sortMode === "fit"} onClick={() => { setSortMode("fit"); setDefaultSaveFailed(false); }} className={cn("inline-flex items-center hover:text-foreground max-sm:min-h-[44px] max-sm:min-w-[44px] max-sm:justify-center", sortMode === "fit" ? "font-medium text-foreground" : "text-faint")}>Best fit</button>
             <button type="button" aria-pressed={sortMode === "newest"} onClick={() => { setSortMode("newest"); setDefaultSaveFailed(false); }} className={cn("inline-flex items-center hover:text-foreground max-sm:min-h-[44px] max-sm:min-w-[44px] max-sm:justify-center", sortMode === "newest" ? "font-medium text-foreground" : "text-faint")}>Newest</button>
@@ -439,7 +590,37 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
               {sortMode === defaultSort ? "✓ Default" : "Make default"}
             </button>
             {defaultSaveFailed && <span role="status" className="text-red-700 dark:text-red-400">Can’t save in this browser</span>}
+            <span aria-hidden="true" className="text-border">|</span>
+            <button
+              type="button"
+              onClick={() => void handleReset()}
+              disabled={resetting}
+              title="Clear old scanned jobs and start a clean rescan"
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted transition-colors hover:text-red-500 hover:bg-red-500/10 disabled:opacity-50"
+            >
+              <RotateCcw className={cn("size-3", resetting && "animate-spin")} />
+              {resetting ? "Resetting…" : "Reset & rescan"}
+            </button>
           </div>
+          {visible.length > 0 && (
+            <button
+              type="button"
+              onClick={scoreAllVisible}
+              title="Batch evaluate all visible roles"
+              className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-400"
+            >
+              <Sparkles className="size-3" /> Score all ({visible.length})
+            </button>
+          )}
+          {visible.length > 0 && selected.size < visible.length && (
+            <button
+              type="button"
+              onClick={selectAllVisible}
+              className="inline-flex items-center gap-1 text-xs text-faint transition-colors hover:text-foreground"
+            >
+              <CheckSquare className="size-3" /> Select all
+            </button>
+          )}
           {hiddenCount > 0 && (
             <button type="button" onClick={() => void restoreHidden()} disabled={restoring} aria-busy={restoring} className="text-xs text-faint transition-colors hover:text-foreground disabled:opacity-50 max-sm:min-h-[44px]">
               {hiddenCount} hidden · {restoring ? "restoring…" : "restore"}
@@ -450,13 +631,24 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
 
       {/* multi-select action bar */}
       {selected.size > 0 && (
-        <div className="mt-2 flex items-center gap-3 rounded-lg border border-brand/30 bg-brand-soft px-3 py-2 text-sm">
+        <div className="mt-2 flex flex-wrap items-center gap-3 rounded-xl border border-brand/30 bg-brand-soft/80 px-3.5 py-2 text-sm shadow-sm">
           <span className="font-medium text-brand-text tabular-nums">{selected.size} selected</span>
-          <button type="button" onClick={saveSelected} className="rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-brand-foreground max-sm:min-h-[44px]">
+          <button
+            type="button"
+            onClick={scoreSelected}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-500 max-sm:min-h-[44px]"
+          >
+            <Sparkles className="size-3.5" /> Score selected ({selected.size})
+          </button>
+          <button type="button" onClick={saveSelected} className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-brand-foreground shadow-sm transition hover:bg-brand-200 max-sm:min-h-[44px]">
             Save to shortlist
           </button>
-          <button type="button" onClick={skipSelected} className="rounded-md border border-border px-2.5 py-1 text-xs font-medium text-foreground hover:border-brand/40 max-sm:min-h-[44px]">
-            Skip selected
+          <button
+            type="button"
+            onClick={skipSelected}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-500/20 dark:text-red-400 max-sm:min-h-[44px]"
+          >
+            <Trash2 className="size-3.5" /> Remove from pipeline
           </button>
           <button type="button" onClick={() => setSelected(new Set())} className="text-xs text-muted hover:text-foreground max-sm:min-h-[44px]">
             Clear
@@ -481,6 +673,7 @@ export function InboxTriage({ inbox }: { inbox: InboxJob[] }) {
               onToggleSelect={() => toggleSelect(e.job.url)}
               onSave={() => save(e.job)}
               onSkip={() => skip(e.job)}
+              onEvaluate={() => evaluateOne(e.job)}
             />
           ))}
         </ul>

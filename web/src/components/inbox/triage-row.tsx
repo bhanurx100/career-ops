@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Bookmark, BookmarkCheck, Loader2, X, CirclePause } from "lucide-react";
+import { Bookmark, BookmarkCheck, Loader2, X, CirclePause, Sparkles, AlertTriangle, RotateCcw } from "lucide-react";
 import type { InboxJob } from "@/lib/career-ops";
 import type { AtsSource } from "@/lib/explore";
 import { ATS_LABEL } from "@/lib/explore";
@@ -11,7 +11,15 @@ import { CompanyLogo } from "@/components/company-logo";
 import { cn } from "@/lib/cn";
 import { inboxScoreTarget } from "@/lib/inbox-score-target.mjs";
 
-export type RowScore = { score: number | null; tone: "good" | "warn" | "bad" | "muted"; jobId: string; running: boolean; reportN?: number | null; needsReview?: boolean };
+export type RowScore = {
+  score: number | null;
+  tone: "good" | "warn" | "bad" | "muted";
+  jobId: string;
+  running: boolean;
+  error?: string | null;
+  reportN?: number | null;
+  needsReview?: boolean;
+};
 
 function agoLabel(age: number | null): string | null {
   if (age == null) return null;
@@ -38,6 +46,7 @@ export function TriageRow({
   onToggleSelect,
   onSave,
   onSkip,
+  onEvaluate,
 }: {
   index: number;
   cursor: boolean;
@@ -51,6 +60,7 @@ export function TriageRow({
   onToggleSelect: () => void;
   onSave: () => void;
   onSkip: () => void;
+  onEvaluate: () => void;
 }) {
   const ago = agoLabel(age);
   const target = inboxScoreTarget(scored);
@@ -103,8 +113,32 @@ export function TriageRow({
         </p>
       </div>
 
-      {/* EVALUADA state (right-aligned, visually distinct from raw rows) */}
-      {scored?.needsReview ? (
+      {/* Scoring / Error / Evaluated / Action buttons */}
+      {scored?.running ? (
+        <div className="flex shrink-0 items-center gap-1.5 rounded-full border border-brand/40 bg-brand-soft/70 px-3 py-1 text-xs font-medium text-brand-text shadow-sm">
+          <Loader2 className="size-3.5 animate-spin" />
+          <span>Scoring…</span>
+        </div>
+      ) : scored?.error ? (
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Link
+            href={`/jobs/${scored.jobId}`}
+            title={scored.error}
+            className="flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs font-medium text-red-600 transition hover:bg-red-500/20 dark:text-red-400"
+          >
+            <AlertTriangle className="size-3.5" />
+            <span className="max-w-[120px] truncate">{scored.error}</span>
+          </Link>
+          <button
+            type="button"
+            onClick={onEvaluate}
+            title="Retry evaluation"
+            className="rounded-md border border-border px-2 py-1 text-xs font-medium text-muted hover:border-brand/40 hover:text-brand-text"
+          >
+            Retry
+          </button>
+        </div>
+      ) : scored?.needsReview ? (
         <div className="flex shrink-0 items-center gap-1">
           <Link href={`/jobs/${scored.jobId}`} className="flex items-center gap-1.5 text-xs text-amber-800 dark:text-amber-400">
             <CirclePause className="size-3.5" /> Needs review
@@ -120,20 +154,34 @@ export function TriageRow({
           </button>
         </div>
       ) : evaluated && target.href ? (
-        <Link href={target.href} className="flex shrink-0 items-center gap-1.5 text-xs">
-          {scored!.running ? (
-            <>
-              <Loader2 className="size-3.5 animate-spin text-brand-text" />
-              <span className="text-brand-text max-sm:hidden">Scoring…</span>
-            </>
-          ) : target.showScore ? (
-            <Badge tone={scored!.tone}>{scored!.score}/5</Badge>
-          ) : (
-            <span className="text-brand-text">Report</span>
-          )}
-        </Link>
+        <div className="flex shrink-0 items-center gap-2">
+          <Link href={target.href} className="flex items-center gap-1.5 text-xs">
+            {target.showScore ? (
+              <Badge tone={scored!.tone}>{scored!.score}/5</Badge>
+            ) : (
+              <span className="text-brand-text font-medium">Report #{scored?.reportN ?? ""}</span>
+            )}
+          </Link>
+          <button
+            type="button"
+            onClick={onEvaluate}
+            title="Re-evaluate this role"
+            className="inline-flex items-center justify-center p-1 rounded text-faint hover:text-brand-text hover:bg-surface-hover transition-colors"
+          >
+            <RotateCcw className="size-3.5" />
+          </button>
+        </div>
       ) : (
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onEvaluate}
+            title="Evaluate this role"
+            className="inline-flex items-center justify-center gap-1 rounded-md bg-brand/10 border border-brand/30 px-2.5 py-1 text-xs font-medium text-brand-text transition-colors hover:bg-brand hover:text-brand-foreground max-sm:min-h-[44px]"
+          >
+            <Sparkles className="size-3.5" />
+            <span>Evaluate</span>
+          </button>
           <button
             type="button"
             onClick={onSave}
@@ -150,8 +198,9 @@ export function TriageRow({
           <button
             type="button"
             onClick={onSkip}
-            title="Skip — hide from the inbox"
-            className="inline-flex items-center justify-center rounded-md p-1 text-faint transition-colors hover:bg-surface-hover hover:text-foreground max-sm:min-h-[44px] max-sm:min-w-[44px]"
+            title="Remove from pipeline"
+            aria-label={`Remove ${job.company} ${job.role} from pipeline`}
+            className="inline-flex items-center justify-center rounded-md p-1 text-faint transition-colors hover:bg-red-500/10 hover:text-red-500 max-sm:min-h-[44px] max-sm:min-w-[44px]"
           >
             <X className="size-4" />
           </button>

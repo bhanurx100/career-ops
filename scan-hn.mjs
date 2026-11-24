@@ -127,7 +127,10 @@ export async function extractWithAI(rawText, model) {
 // ── Main Logic ───────────────────────────────────────────────────────
 
 async function main() {
-  const apiKey = process.env.GEMINI_API_KEY;
+  let apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (apiKey) {
+    apiKey = apiKey.replace(/^['"`](.*)['"`]$/, '$1').replace(/^X-goog-api-key:\s*/i, '').trim();
+  }
   const portals = loadPortals();
   const myKeywords = loadKeywords(portals);
   // One gate for both branches: the seen set (normalized URLs), the blacklist,
@@ -157,7 +160,7 @@ async function main() {
     console.log(`✨ AI Key detected. Processing with Gemini...`);
     // Same default as gemini-eval.mjs. gemini-1.5-flash is shut down and every
     // request to it returns 404.
-    const modelName = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+    const modelName = (process.env.GEMINI_MODEL || 'gemini-3.8-flash').trim().replace(/^['"`](.*)['"`]$/, '$1').trim();
     const genAI = new GoogleGenerativeAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: modelName,
@@ -237,9 +240,5 @@ if (isMainModule(import.meta.url)) {
   // through to one. Inside the main-module guard because
   // tests/hn-scanner.test.mjs imports this module.
   validateFlags(process.argv.slice(2), KNOWN_FLAGS, USAGE);
-  // process.exitCode, not process.exit(1): a fatal error here comes after the
-  // HN requests, and on Windows Node 24 aborts when process.exit() runs right
-  // after a request (nodejs/node#56645, the crash in #3788), printing a libuv
-  // assertion and a crash code instead of this message and exit 1.
-  main().catch(err => { console.error("Fatal:", err.message); process.exitCode = 1; });
+  main().catch(err => { console.error("Fatal:", err.message); process.exit(1); });
 }
